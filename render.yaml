@@ -1,0 +1,11 @@
+services:
+    - type: web
+      name: yt-dlp-mega
+      env: node
+      buildCommand: |
+          apt-get update
+          apt-get install -y python3 python3-pip
+          pip3 install yt-dlp
+          npm install
+      startCommand: node app.js
+      plan: free
