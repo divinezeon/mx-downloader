@@ -362,6 +362,10 @@ app.get('/status', (req, res) => {
     }
 });
 
+app.get("/", (req, res) => {
+    res.send("Hello World");
+});
+
 // Start server
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
