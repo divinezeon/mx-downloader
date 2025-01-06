@@ -1,9 +1,9 @@
 const express = require('express');
-const { exec } = require('child_process');
 const fs = require('fs');
 const { Storage } = require('megajs');
 const dotenv = require('dotenv');
 const path = require('path');
+const ytdlp = require('yt-dlp-exec');
 
 // Load environment variables
 dotenv.config();
@@ -93,39 +93,34 @@ async function uploadToMega(filePath, fileName) {
     });
 }
 
-// Download and upload function with improved error handling
+// Download and upload function using yt-dlp-exec
 async function downloadAndUpload(url, episodeNumber) {
     const fileName = `My Girlfriend is An Alien S01E${String(episodeNumber).padStart(2, '0')} 1080p x264 Hindi.mp4`;
     const filePath = path.join(DOWNLOAD_FOLDER, fileName);
 
     try {
-        // Download video
-        await new Promise((resolve, reject) => {
-            const command = `yt-dlp -o "${filePath}" "${url}"`;
-            const process = exec(command);
+        // Download video using yt-dlp-exec
+        console.log(`Starting download for episode ${episodeNumber}`);
 
-            process.stdout.on('data', (data) => {
-                console.log(`Episode ${episodeNumber} Progress: ${data}`);
-            });
-
-            process.stderr.on('data', (data) => {
-                console.error(`Episode ${episodeNumber} Error: ${data}`);
-            });
-
-            process.on('close', (code) => {
-                if (code === 0) {
-                    resolve();
-                } else {
-                    reject(new Error(`Download process exited with code ${code}`));
-                }
-            });
+        await ytdlp(url, {
+            output: filePath,
+            verbose: true,
+            noCheckCertificates: true,
+            progress: true
         });
+
+        console.log(`Download completed for episode ${episodeNumber}`);
 
         // Upload to Mega
         await uploadToMega(filePath, fileName);
         return { success: true, message: `Successfully processed episode ${episodeNumber}` };
     } catch (error) {
-        return { success: false, message: `Failed to process episode ${episodeNumber}: ${error.message}` };
+        console.error(`Error processing episode ${episodeNumber}:`, error);
+        return {
+            success: false,
+            message: `Failed to process episode ${episodeNumber}: ${error.message}`,
+            details: error.stack
+        };
     }
 }
 
@@ -174,11 +169,6 @@ app.get('/status', (req, res) => {
         });
     }
 });
-
-app.get('/', (req, res) => {
-    res.send('Hello World!');
-});
-
 
 // Start server
 app.listen(PORT, () => {
