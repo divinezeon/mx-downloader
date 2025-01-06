@@ -13,14 +13,33 @@ app.use(express.json());
 
 // Constants
 const DOWNLOAD_FOLDER = './downloads';
+const LOGS_FOLDER = './logs';
 const PORT = process.env.PORT || 3000;
 const EMAIL = process.env.MEGA_EMAIL;
 const PASSWORD = process.env.MEGA_PASSWORD;
 
-// Ensure downloads folder exists
-if (!fs.existsSync(DOWNLOAD_FOLDER)) {
-    fs.mkdirSync(DOWNLOAD_FOLDER);
+// Ensure required folders exist
+[DOWNLOAD_FOLDER, LOGS_FOLDER].forEach(folder => {
+    if (!fs.existsSync(folder)) {
+        fs.mkdirSync(folder);
+    }
+});
+
+
+// Create a write stream for logging
+function createLogStream(episodeNumber) {
+    const logFile = path.join(LOGS_FOLDER, `episode_${episodeNumber}_${Date.now()}.log`);
+    return fs.createWriteStream(logFile, { flags: 'a' });
 }
+
+// Log function with timestamp
+function logWithTimestamp(logStream, message) {
+    const timestamp = new Date().toISOString();
+    const logMessage = `[${timestamp}] ${message}\n`;
+    console.log(logMessage.trim());
+    logStream.write(logMessage);
+}
+
 
 let megaStorage = null;
 
@@ -54,7 +73,8 @@ async function initializeMegaStorage() {
 }
 
 // Upload function with improved error handling
-async function uploadToMega(filePath, fileName) {
+// Modified upload function with progress tracking
+async function uploadToMega(filePath, fileName, logStream) {
     if (!megaStorage) {
         throw new Error('Mega storage not initialized');
     }
@@ -63,26 +83,41 @@ async function uploadToMega(filePath, fileName) {
         try {
             const stats = fs.statSync(filePath);
             const fileStream = fs.createReadStream(filePath);
+            const totalSize = stats.size;
+            let uploadedSize = 0;
+            let lastProgressLog = 0;
 
             const uploadStream = megaStorage.upload({
                 name: fileName,
                 size: stats.size
             });
 
+            // Track upload progress
+            uploadStream.on('progress', (data) => {
+                uploadedSize = data;
+                const progressPercent = ((uploadedSize / totalSize) * 100).toFixed(2);
+
+                // Log progress every 5%
+                if (progressPercent - lastProgressLog >= 5) {
+                    logWithTimestamp(logStream, `Upload Progress: ${progressPercent}% (${(uploadedSize / 1024 / 1024).toFixed(2)}MB / ${(totalSize / 1024 / 1024).toFixed(2)}MB)`);
+                    lastProgressLog = Math.floor(progressPercent / 5) * 5;
+                }
+            });
+
             uploadStream.on('complete', () => {
-                console.log(`Uploaded ${fileName} to Mega Cloud.`);
+                logWithTimestamp(logStream, `Upload completed: ${fileName}`);
                 fs.unlink(filePath, (err) => {
                     if (err) {
-                        console.error(`Failed to delete local file ${filePath}: ${err.message}`);
+                        logWithTimestamp(logStream, `Failed to delete local file ${filePath}: ${err.message}`);
                     } else {
-                        console.log(`Deleted local file: ${filePath}`);
+                        logWithTimestamp(logStream, `Deleted local file: ${filePath}`);
                     }
                 });
                 resolve();
             });
 
             uploadStream.on('error', (err) => {
-                console.error(`Failed to upload ${fileName} to Mega Cloud: ${err.message}`);
+                logWithTimestamp(logStream, `Upload error: ${err.message}`);
                 reject(err);
             });
 
@@ -92,30 +127,42 @@ async function uploadToMega(filePath, fileName) {
         }
     });
 }
-
 // Download and upload function using yt-dlp-exec
 async function downloadAndUpload(url, episodeNumber) {
     const fileName = `My Girlfriend is An Alien S01E${String(episodeNumber).padStart(2, '0')} 1080p x264 Hindi.mp4`;
     const filePath = path.join(DOWNLOAD_FOLDER, fileName);
+    const logStream = createLogStream(episodeNumber);
 
     try {
-        // Download video using yt-dlp-exec
-        console.log(`Starting download for episode ${episodeNumber}`);
+        logWithTimestamp(logStream, `Starting process for episode ${episodeNumber}`);
+        logWithTimestamp(logStream, `URL: ${url}`);
 
+        // Download video using yt-dlp-exec with progress tracking
         await ytdlp(url, {
             output: filePath,
             verbose: true,
             noCheckCertificates: true,
-            progress: true
+            progress: true,
+            callback: (progress) => {
+                if (progress.percent) {
+                    logWithTimestamp(logStream, `Download Progress: ${progress.percent.toFixed(2)}% at ${progress.speed} - ETA: ${progress.eta}`);
+                }
+            }
         });
 
-        console.log(`Download completed for episode ${episodeNumber}`);
+        logWithTimestamp(logStream, `Download completed for episode ${episodeNumber}`);
 
         // Upload to Mega
-        await uploadToMega(filePath, fileName);
+        await uploadToMega(filePath, fileName, logStream);
+
+        logWithTimestamp(logStream, `Process completed for episode ${episodeNumber}`);
+        logStream.end();
+
         return { success: true, message: `Successfully processed episode ${episodeNumber}` };
     } catch (error) {
-        console.error(`Error processing episode ${episodeNumber}:`, error);
+        logWithTimestamp(logStream, `Error: ${error.message}\n${error.stack}`);
+        logStream.end();
+
         return {
             success: false,
             message: `Failed to process episode ${episodeNumber}: ${error.message}`,
@@ -158,9 +205,19 @@ app.post('/download', async (req, res) => {
 app.get('/status', (req, res) => {
     try {
         const files = fs.readdirSync(DOWNLOAD_FOLDER);
+        const logs = fs.readdirSync(LOGS_FOLDER).map(logFile => {
+            const logPath = path.join(LOGS_FOLDER, logFile);
+            const logContent = fs.readFileSync(logPath, 'utf-8');
+            return {
+                filename: logFile,
+                content: logContent
+            };
+        });
+
         res.json({
             downloadingFiles: files,
-            downloadFolder: DOWNLOAD_FOLDER
+            downloadFolder: DOWNLOAD_FOLDER,
+            logs: logs
         });
     } catch (error) {
         res.status(500).json({
